@@ -640,6 +640,10 @@ class HEOMSolver(Solver):
         "store_ados": False,
         "state_data_type": "dense",
         "backend": "csr",
+        "ts_type": "rk",
+        "ts_adapt": "none",
+        "dt": 1e-4,
+        "max_steps": 10000,
     }
 
     def __init__(self, H, bath, max_depth, *, odd_parity=False, options=None):
