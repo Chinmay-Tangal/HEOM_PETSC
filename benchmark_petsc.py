@@ -20,7 +20,7 @@ def run_benchmark():
     Q = sigmax()
     ck = [1.0]
     vk = [0.1]
-    bath = BosonicBath(Q, ck, vk)
+    bath = BosonicBath(Q, ck, vk, ck, vk)
 
     for depth in [2, 4, 6, 8]:
         for backend in ["csr", "petsc"]:

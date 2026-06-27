@@ -639,10 +639,12 @@ class HEOMSolver(Solver):
         "method": "adams",
         "store_ados": False,
         "state_data_type": "dense",
+        "backend": "csr",
     }
 
     def __init__(self, H, bath, max_depth, *, odd_parity=False, options=None):
         _time_start = time()
+        self.options = options
         # we call bool here because odd_parity will be used in arithmetic
         self.odd_parity = bool(odd_parity)
         if not isinstance(H, (Qobj, QobjEvo)):
@@ -706,7 +708,6 @@ class HEOMSolver(Solver):
             # We initialize the PETSc integrator natively.
             from qutip.solver.integrator.petsc_integrator import IntegratorPETSc
             self.rhs = rhs
-            self.options = options
             _integrator_start = time()
             self._integrator = IntegratorPETSc(rhs, options)
             self._init_integrator_time = time() - _integrator_start

@@ -51,6 +51,7 @@ class IntegratorPETSc(Integrator):
         self.vec = self.mat.createVecRight()
         self.vec.setFromOptions()
         
+        self.ts.setSolution(self.vec)
         self.ts.setUp()
         self.name = f"petsc_ts_{self.options.get('ts_type', 'rk')}"
 
@@ -70,6 +71,22 @@ class IntegratorPETSc(Integrator):
         self.ts.setSolution(self.vec)
         self._is_set = True
 
+    def get_state(self, copy=True):
+        # Gather the distributed vector back to a QuTiP Data object
+        scatter, vec_seq = self.PETSc.Scatter.toAll(self.vec)
+        scatter.scatter(self.vec, vec_seq, self.PETSc.InsertMode.INSERT_VALUES, self.PETSc.ScatterMode.FORWARD)
+        
+        gathered_np = vec_seq.getArray()
+        if copy:
+            gathered_np = gathered_np.copy()
+            
+        # Convert back to qutip.Data Dense
+        shape = (self.mat.getSize()[1], 1)
+        state_data = _data.Dense(gathered_np.reshape(shape))
+        
+        current_t = self.ts.getTime()
+        return current_t, state_data
+
     def integrate(self, t, copy=True):
         if not self._is_set:
             raise RuntimeError("The initial state must be set using set_state before integrating.")
@@ -78,20 +95,7 @@ class IntegratorPETSc(Integrator):
         self.ts.setExactFinalTime(self.PETSc.TS.ExactFinalTime.MATCHSTEP)
         self.ts.solve(self.vec)
         
-        # After solve, we need to gather the distributed vector back to a QuTiP Data object
-        # Since QuTiP's outer API expects a full Qobj state, we must gather the vector to rank 0 (or all ranks).
-        # We will use VecScatter to gather to all ranks so QuTiP works seamlessly.
-        scatter, vec_seq = self.PETSc.Scatter.toAll(self.vec)
-        scatter.scatter(self.vec, vec_seq, self.PETSc.InsertMode.INSERT_VALUES, self.PETSc.ScatterMode.FORWARD)
-        
-        gathered_np = vec_seq.getArray().copy()
-        
-        # Convert back to qutip.Data Dense
-        shape = (self.mat.getSize()[1], 1)
-        state_data = _data.Dense(gathered_np.reshape(shape))
-        
-        current_t = self.ts.getTime()
-        return current_t, state_data
+        return self.get_state(copy=copy)
 
     def mcstep(self, t, copy=True):
         raise NotImplementedError("Monte Carlo steps are not supported for PETSc integrator.")
