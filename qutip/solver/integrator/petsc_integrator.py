@@ -8,10 +8,10 @@ class IntegratorPETSc(Integrator):
     This integrator handles PETSc.Mat directly instead of QobjEvo.
     """
     integrator_options = {
-        "ts_type": "rk",     # Runge-Kutta by default
-        "ts_adapt": "none",  # Adaptivity: 'none', 'basic', etc.
+        "ts_type": "bdf",    # Backward Differentiation Formula (best for stiff HEOM)
+        "ts_adapt": "basic", # Automatic step size adaptivity
         "dt": 1e-4,          # Initial time step
-        "max_steps": 10000,
+        "max_steps": 100000,
         "atol": 1e-8,
         "rtol": 1e-6,
     }
@@ -28,23 +28,31 @@ class IntegratorPETSc(Integrator):
             raise ImportError("petsc4py is required to use IntegratorPETSc.")
             
         self.PETSc = PETSc
-        # self.system is the PETSc.Mat from backend_petsc.py
-        self.mat = self.system
+        # self.system is the PETScRhsWrapper from bofin_solvers.py
+        self.mat = self.system.mat
         
         self.ts = PETSc.TS().create()
         self.ts.setProblemType(PETSc.TS.ProblemType.LINEAR)
-        self.ts.setEquationType(PETSc.TS.EquationType.ODE_EXPLICIT)
         
         self.ts.setRHSFunction(PETSc.TS.computeRHSFunctionLinear)
         self.ts.setRHSJacobian(PETSc.TS.computeRHSJacobianConstant, self.mat, self.mat)
         
-        self.ts.setType(self.options.get("ts_type", "rk"))
+        self.ts.setType(self.options.get("ts_type", "bdf"))
         self.ts.setTimeStep(self.options.get("dt", 1e-4))
-        self.ts.setMaxSteps(self.options.get("max_steps", 10000))
+        self.ts.setMaxSteps(self.options.get("max_steps", 100000))
         self.ts.setTolerances(
             atol=self.options.get("atol", 1e-8),
             rtol=self.options.get("rtol", 1e-6)
         )
+        
+        # Configure the internal linear solver (KSP) for implicit methods
+        snes = self.ts.getSNES()
+        ksp = snes.getKSP()
+        ksp.setType("bcgs")
+        pc = ksp.getPC()
+        pc.setType("jacobi")
+        
+        # Adaptivity is enabled automatically when tolerances are set
         
         # We need a PETSc Vec for the state
         rstart, rend = self.mat.getOwnershipRange()
@@ -54,6 +62,22 @@ class IntegratorPETSc(Integrator):
         self.ts.setSolution(self.vec)
         self.ts.setUp()
         self.name = f"petsc_ts_{self.options.get('ts_type', 'rk')}"
+        
+        # Determine whether to gather the full hierarchy or just the density matrix
+        sys_size = self.system.sys_size
+        self.store_ados = self.options.get("store_ados", False)
+        
+        if sys_size and not self.store_ados:
+            comm = self.mat.getComm()
+            idx_gather = np.arange(sys_size, dtype=np.int32)
+            is_global = self.PETSc.IS().createGeneral(idx_gather, comm=comm)
+            
+            self.vec_seq = self.PETSc.Vec().createSeq(sys_size)
+            is_local = self.PETSc.IS().createStride(sys_size, first=0, step=1, comm=self.PETSc.COMM_SELF)
+            
+            self.scatter = self.PETSc.Scatter().create(self.vec, is_global, self.vec_seq, is_local)
+        else:
+            self.scatter, self.vec_seq = self.PETSc.Scatter.toAll(self.vec)
 
     def set_state(self, t, state0):
         # state0 is a qutip.Data object (usually Dense), we need to extract its values
@@ -73,15 +97,18 @@ class IntegratorPETSc(Integrator):
 
     def get_state(self, copy=True):
         # Gather the distributed vector back to a QuTiP Data object
-        scatter, vec_seq = self.PETSc.Scatter.toAll(self.vec)
-        scatter.scatter(self.vec, vec_seq, self.PETSc.InsertMode.INSERT_VALUES, self.PETSc.ScatterMode.FORWARD)
+        self.scatter.scatter(self.vec, self.vec_seq, self.PETSc.InsertMode.INSERT_VALUES, self.PETSc.ScatterMode.FORWARD)
         
-        gathered_np = vec_seq.getArray()
+        gathered_np = self.vec_seq.getArray()
         if copy:
             gathered_np = gathered_np.copy()
             
         # Convert back to qutip.Data Dense
-        shape = (self.mat.getSize()[1], 1)
+        if getattr(self, "store_ados", True) == False and hasattr(self.system, "sys_size"):
+            shape = (self.system.sys_size, 1)
+        else:
+            shape = (self.mat.getSize()[1], 1)
+            
         state_data = _data.Dense(gathered_np.reshape(shape))
         
         current_t = self.ts.getTime()
